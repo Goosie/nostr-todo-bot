@@ -14,6 +14,7 @@ A TODO list bot for Nostr that runs on Cloudflare Workers. ☑
 - `list` - Show all incomplete TODOs
 - `add <content>` - Add a new TODO (supports multiline)
 - `show <id>` - Display full TODO content
+- `update <id> <content>` - Update existing TODO content
 - `done <id>` - Mark TODO as completed
 - `delete <id>` - Delete a TODO
 - `search <keyword>` - Search TODOs by keyword

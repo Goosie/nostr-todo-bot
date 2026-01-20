@@ -169,6 +169,7 @@ function getHelpMessage(): string {
 list - TODO一覧
 add <内容> - TODO追加
 show <ID> - TODO表示
+update <ID> <内容> - TODO更新
 done <ID> - TODO完了
 delete <ID> - TODO削除
 search <キーワード> - TODO検索
@@ -196,8 +197,9 @@ async function handleMentionDirect(mention: Event, env: Env): Promise<Response> 
             message = 'No todos';
         } else {
             message = results.map((row: any) => {
-                const preview = row.content.replace(/\s+/g, ' ').trim().substring(0, 20);
-                const truncated = row.content.length > 20 ? '...' : '';
+                const cleanedContent = row.content.replace(/nostr:[a-z0-9]+/gi, '').trim();
+                const preview = cleanedContent.replace(/\s+/g, ' ').trim().substring(0, 20);
+                const truncated = cleanedContent.length > 20 ? '...' : '';
                 return `${row.user_id}. ${preview}${truncated}`;
             }).join('\n');
         }
@@ -299,6 +301,29 @@ async function handleMentionDirect(mention: Event, env: Env): Promise<Response> 
             const row: any = results[0];
             message = `${row.user_id}. ${row.content}`;
         }
+
+        return JSONResponse(
+            createReplyWithTags(env.TODO_NSEC, mention, message, []),
+        );
+    }
+
+    const updateMatch = content.match(/^update\s+(\d+)\s+(.+)$/is);
+    if (updateMatch) {
+        const userId = parseInt(updateMatch[1]);
+        const newContent = updateMatch[2].trim();
+        if (!newContent) {
+            return JSONResponse(
+                createReplyWithTags(env.TODO_NSEC, mention, 'Usage: update <id> <content>', []),
+            );
+        }
+
+        const result = await env.nostr_todo.prepare(
+            'UPDATE todos SET content = ? WHERE user_id = ? AND pubkey = ?'
+        ).bind(newContent, userId, pubkey).run();
+
+        const message = result.meta.changes > 0
+            ? `Updated: ${userId}`
+            : `Not found: ${userId}`;
 
         return JSONResponse(
             createReplyWithTags(env.TODO_NSEC, mention, message, []),

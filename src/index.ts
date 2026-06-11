@@ -106,7 +106,7 @@ function decryptTodoEvent(event: Event, pubkey: string): string | null {
 }
 
 // Query TODOs for a user from relay
-async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string }>> {
+async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string; blocknr?: number }>> {
   try {
     // querySync is actually async (returns Promise despite the name)
     // Query all Kind 1 events from Toddy, filter client-side
@@ -157,9 +157,15 @@ async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; conte
       })
       .map((e) => {
         const decrypted = decryptTodoEvent(e, pubkey);
-        return decrypted ? { id: e.id, content: decrypted } : null;
+        if (!decrypted) return null;
+
+        // Extract block number from tags
+        const blocknrTag = e.tags.find((t) => t[0] === 'blocknr');
+        const blocknr = blocknrTag ? parseInt(blocknrTag[1], 10) : undefined;
+
+        return { id: e.id, content: decrypted, blocknr };
       })
-      .filter((t) => t !== null) as Array<{ id: string; content: string }>;
+      .filter((t) => t !== null) as Array<{ id: string; content: string; blocknr?: number }>;
 
     return todos;
   } catch (err) {
@@ -199,24 +205,25 @@ async function sendDmReply(recipientPubkey: string, message: string): Promise<vo
 }
 
 // Command handlers
-function commandList(todos: Array<{ id: string; content: string }>): string {
+function commandList(todos: Array<{ id: string; content: string; blocknr?: number }>): string {
   if (todos.length === 0) return '✅ All clear!';
 
   const lines = todos
     .map((t, i) => {
       const content = t.content.length > 40 ? t.content.slice(0, 37) + '...' : t.content;
-      return `${i + 1}. ${content} (${t.id.slice(0, 8)})`;
+      const blockInfo = t.blocknr ? ` (block ${t.blocknr})` : '';
+      return `${i + 1}. ${content}${blockInfo}`;
     })
     .join('\n');
 
   return `📋 Your TODOs:\n${lines}`;
 }
 
-function commandAdd(todos: Array<{ id: string; content: string }>, content: string): string {
+function commandAdd(todos: Array<{ id: string; content: string; blocknr?: number }>, content: string): string {
   return `✅ TODO added: "${content}"\nID: ${todos.length + 1}`;
 }
 
-function commandDone(todos: Array<{ id: string; content: string }>, idStr: string): string {
+function commandDone(todos: Array<{ id: string; content: string; blocknr?: number }>, idStr: string): string {
   const idx = parseInt(idStr, 10) - 1;
   if (isNaN(idx) || idx < 0 || idx >= todos.length) {
     return `❌ Invalid ID. Use "list" to see your TODOs.`;
@@ -225,7 +232,7 @@ function commandDone(todos: Array<{ id: string; content: string }>, idStr: strin
   return `✅ TODO done: "${todo.content}"`;
 }
 
-function commandDelete(todos: Array<{ id: string; content: string }>, idStr: string): string {
+function commandDelete(todos: Array<{ id: string; content: string; blocknr?: number }>, idStr: string): string {
   const idx = parseInt(idStr, 10) - 1;
   if (isNaN(idx) || idx < 0 || idx >= todos.length) {
     return `❌ Invalid ID. Use "list" to see your TODOs.`;
@@ -234,13 +241,14 @@ function commandDelete(todos: Array<{ id: string; content: string }>, idStr: str
   return `🗑️ TODO deleted: "${todo.content}"`;
 }
 
-function commandShow(todos: Array<{ id: string; content: string }>, idStr: string): string {
+function commandShow(todos: Array<{ id: string; content: string; blocknr?: number }>, idStr: string): string {
   const idx = parseInt(idStr, 10) - 1;
   if (isNaN(idx) || idx < 0 || idx >= todos.length) {
     return `❌ Invalid ID. Use "list" to see your TODOs.`;
   }
   const todo = todos[idx];
-  return `📝 #${idx + 1}:\n${todo.content}`;
+  const blockInfo = todo.blocknr ? `\nCreated at block ${todo.blocknr}` : '';
+  return `📝 #${idx + 1}:\n${todo.content}${blockInfo}`;
 }
 
 function commandHelp(): string {
@@ -498,7 +506,8 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
         const lines = matches
           .map((t, i) => {
             const content = t.content.length > 40 ? t.content.slice(0, 37) + '...' : t.content;
-            return `${i + 1}. ${content}`;
+            const blockInfo = t.blocknr ? ` (block ${t.blocknr})` : '';
+            return `${i + 1}. ${content}${blockInfo}`;
           })
           .join('\n');
         return `🔍 Results for "${args}":\n${lines}`;

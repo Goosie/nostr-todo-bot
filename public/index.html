@@ -332,7 +332,12 @@
     async function loadProjects() {
       try {
         const res = await fetch('/api/projects');
+        if (!res.ok) {
+          console.error('Failed to load projects:', res.status);
+          return;
+        }
         const projects = await res.json();
+        console.log('[✓] Loaded projects:', projects.length);
         renderProjects(projects);
       } catch (err) {
         console.error('Error loading projects:', err);
@@ -486,20 +491,30 @@
       }
 
       try {
-        await fetch('/api/projects', {
+        const res = await fetch('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, description, createdBy }),
         });
+
+        if (!res.ok) {
+          alert('Error creating project');
+          return;
+        }
+
+        const project = await res.json();
+        console.log('[✓] Project created:', project);
 
         closeNewProjectModal();
         document.getElementById('projectName').value = '';
         document.getElementById('projectDescription').value = '';
         document.getElementById('projectCreatedBy').value = '';
 
-        loadProjects();
+        // Reload projects
+        await loadProjects();
       } catch (err) {
         console.error('Error creating project:', err);
+        alert('Error: ' + err.message);
       }
     }
 

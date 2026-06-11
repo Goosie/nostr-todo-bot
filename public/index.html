@@ -491,14 +491,20 @@
       }
 
       try {
+        console.log('[POST] Creating project:', { name, description, createdBy });
+
         const res = await fetch('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, description, createdBy }),
         });
 
+        console.log('[Response] Status:', res.status, 'OK:', res.ok);
+
         if (!res.ok) {
-          alert('Error creating project');
+          const errorText = await res.text();
+          console.error('[Error] Server responded with:', errorText);
+          alert('Error creating project: ' + res.status + ' ' + errorText);
           return;
         }
 

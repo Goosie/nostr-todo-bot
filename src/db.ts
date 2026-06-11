@@ -26,8 +26,10 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
   dm_thread_url TEXT,
   relay_event_id TEXT,
   created_at INTEGER NOT NULL,
+  created_blocknr INTEGER,
   updated_by TEXT,
   updated_at INTEGER NOT NULL,
+  done_blocknr INTEGER,
   FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 

@@ -243,6 +243,19 @@ function commandHelp(): string {
 - help          Show this message`;
 }
 
+// Helper: get current block number from Blocky
+async function getCurrentBlocknr(): Promise<number> {
+  try {
+    // Try to read from Blocky's state file or query it
+    // For now, return a placeholder - we'll query Blocky's state
+    const blockState = readFileSync('/tmp/blocky-block.txt', 'utf8').trim();
+    return parseInt(blockState, 10) || 0;
+  } catch (err) {
+    // If no file, return 0 (we'll store it anyway)
+    return 0;
+  }
+}
+
 // Helper: load agents and look up pubkey by name
 function loadAgents(): Record<string, any> {
   try {
@@ -291,10 +304,19 @@ function validateTodoContent(content: string): { valid: boolean; error?: string 
   return { valid: true };
 }
 
-// Parse and execute command from DM
+// Parse and execute command from DM or socket
 async function handleCommand(fromPubkey: string, content: string): Promise<string> {
+  let actualFromPubkey = fromPubkey;
+
+  // Check if command includes explicit pubkey: @pubkey:command
+  const pubkeyMatch = content.match(/^@([a-f0-9]{64}):/);
+  if (pubkeyMatch) {
+    actualFromPubkey = pubkeyMatch[1];
+    content = content.slice(pubkeyMatch[0].length);
+  }
+
   // Rate limiting
-  if (!checkRateLimit(fromPubkey)) {
+  if (!checkRateLimit(actualFromPubkey)) {
     return '⏸️ Too many commands. Please wait a minute.';
   }
 
@@ -303,7 +325,7 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
   const args = parts.slice(1).join(' ');
 
   // Query user's TODOs
-  const todos = await queryUserTodos(fromPubkey);
+  const todos = await queryUserTodos(actualFromPubkey);
 
   switch (cmd) {
     case 'list':
@@ -361,14 +383,14 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
         pubkey: toddy.pubkey,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['p', fromPubkey],
+          ['p', actualFromPubkey],
           ['e', todo.id, '', 'done'], // Reference the TODO being marked done
         ],
         content: '', // Encrypted marker
         sig: '',
       };
 
-      const conversationKey = nip44.getConversationKey(toddySk, fromPubkey);
+      const conversationKey = nip44.getConversationKey(toddySk, actualFromPubkey);
       const encryptedContent = nip44.encrypt('DONE', conversationKey);
       doneEvent.content = encryptedContent;
 
@@ -395,14 +417,14 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
         pubkey: toddy.pubkey,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['p', fromPubkey],
+          ['p', actualFromPubkey],
           ['e', todo.id, '', 'delete'], // Reference the TODO being deleted
         ],
         content: '', // Encrypted marker
         sig: '',
       };
 
-      const conversationKey = nip44.getConversationKey(toddySk, fromPubkey);
+      const conversationKey = nip44.getConversationKey(toddySk, actualFromPubkey);
       const encryptedContent = nip44.encrypt('DELETED', conversationKey);
       deleteEvent.content = encryptedContent;
 

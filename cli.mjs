@@ -1,18 +1,36 @@
 #!/usr/bin/env node
 
 import * as net from 'net';
-import { readFileSync } from 'fs';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const SOCKET_PATH = '/tmp/toddy.sock';
 const AGENTS_JSON_PATH = '/home/deploy/agents/agents.json';
+const AGENTS_DIR = '/home/deploy/agents';
 
 // Load agents for >>gansnaam lookups
 let agents = [];
 try {
-  const agentsData = JSON.parse(readFileSync(AGENTS_JSON_PATH, 'utf8'));
+  const agentsData = JSON.parse(fs.readFileSync(AGENTS_JSON_PATH, 'utf8'));
   agents = agentsData.agents || [];
 } catch (err) {
   // Agents file not found, that's ok
+}
+
+// Get pubkey for a gans name
+function getGansPubkey(gansnaam) {
+  // Check if it's an agent name
+  const agent = agents.find(a => a.name.toLowerCase() === gansnaam.toLowerCase());
+  if (agent) return agent.pubkey;
+
+  // Try to read from agents/<gansnaam>/nostr-key.json
+  try {
+    const keyPath = path.join(AGENTS_DIR, gansnaam.toLowerCase(), 'nostr-key.json');
+    const keyData = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
+    return keyData.pubkey;
+  } catch (err) {
+    return null;
+  }
 }
 
 function findAgentName(name) {
@@ -121,8 +139,21 @@ async function main() {
     process.exit(0);
   }
 
-  // Build command with optional target gans
+  // Determine caller pubkey
+  // If called as >>gansnaam, use that gans's pubkey
+  // Otherwise, try to read from TODDY_GANS env var or default to toddy
+  let callerGans = process.env.TODDY_GANS || 'toddy';
+  let callerPubkey = getGansPubkey(callerGans);
+
+  if (!callerPubkey) {
+    console.error(`❌ Error: Could not find pubkey for ${callerGans}`);
+    process.exit(1);
+  }
+
+  // Build command with caller pubkey and optional target gans
   let command = message ? `${cmd} ${message}` : cmd;
+  command = `@${callerPubkey}:${command}`;
+
   if (targetGans) {
     command += ` >>@${targetGans}`;
   }

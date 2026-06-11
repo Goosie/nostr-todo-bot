@@ -13,6 +13,8 @@ import {
   SimplePool,
   verifyEvent,
 } from 'nostr-tools';
+import { initDatabase } from './db';
+import { startServer } from './server';
 
 // Env vars
 const RELAY_URL = process.env.RELAY_URL || 'ws://127.0.0.1:7778';
@@ -548,6 +550,14 @@ async function main() {
   loadToddyKey();
   console.log('[✓] Toddy key loaded');
 
+  // Initialize database
+  try {
+    await initDatabase();
+  } catch (err) {
+    console.error('[DB] Error initializing database:', err);
+    process.exit(1);
+  }
+
   // Warm up relay connection
   console.log('[Relay] Warming up connection...');
   try {
@@ -560,10 +570,12 @@ async function main() {
   startListener();
   startStdinListener();
   startSocketListener();
+  startServer(3333);
 
   console.log('[✓] Nostr TODO Bot started');
   console.log(`[✓] Send a DM to ${toddy.npub} to start using!`);
   console.log(`[✓] Local socket available at ${SOCKET_PATH}`);
+  console.log('[✓] Web board available at http://localhost:3333');
 }
 
 main().catch(console.error);

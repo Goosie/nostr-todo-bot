@@ -1,814 +1,301 @@
-"use strict";
-
-import { Hono } from 'hono'
-import { html } from 'hono/html'
-
+import 'websocket-polyfill';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import {
-    Event,
-    getEventHash,
-    getPublicKey,
-    finalizeEvent,
-    nip19,
-    SimplePool,
-    verifyEvent,
-} from "nostr-tools";
+  Event,
+  getEventHash,
+  getPublicKey,
+  finalizeEvent,
+  nip19,
+  nip44,
+  SimplePool,
+  verifyEvent,
+} from 'nostr-tools';
 
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
+// Env vars
+const RELAY_URL = process.env.RELAY_URL || 'ws://127.0.0.1:7778';
+const TODDY_KEY_PATH = process.env.TODDY_KEY_PATH || '/home/deploy/agents/toddy/nostr-key.json';
+const TODO_KIND = 1; // Kind 1 for encrypted TODO storage
 
-const cache = caches.default;
+// Load Toddy's key
+let toddy: { pubkey: string; nsecHex: string; npub: string };
+let toddySk: Uint8Array;
 
-export interface Env {
-    TODO_NSEC: string;
-    ASSETS: Fetcher;
-    nostr_todo: D1Database;
+function loadToddyKey() {
+  const keyData = JSON.parse(readFileSync(TODDY_KEY_PATH, 'utf8'));
+  toddy = keyData;
+  toddySk = new Uint8Array(Buffer.from(toddy.nsecHex, 'hex'));
+  console.log(`[Toddy] Loaded pubkey: ${toddy.pubkey}`);
 }
 
+// Relay and pool
 const pool = new SimplePool();
-const relays = ['wss://yabu.me', 'wss://relay-jp.nostr.wirednet.jp', 'wss://nos.lol', 'wss://relay.damus.io']
 
-type Bindings = {
-    DB: D1Database
-}
-
-const app = new Hono<{ Bindings: Bindings }>()
-
-function notAuthenticated(_request: Request, _env: Env) {
-    return new Response(
-        "Not Authenticated",
-        {
-            status: 401,
-            headers: {
-                "content-type": "text/plain; charset=UTF-8",
-                "accept-charset": "utf-8",
-            },
-        },
-    );
-}
-
-function notFound(_request: Request, _env: Env) {
-    return new Response(`Not found`, {
-        status: 404,
-    });
-}
-
-function unsupportedMethod(_request: Request, _env: Env) {
-    return new Response(`Unsupported method`, {
-        status: 400,
-    });
-}
-
-function bearerAuthentication(request: Request, secret: string) {
-    if (!request.headers.has("authorization")) {
-        return false;
-    }
-    const authorization = request.headers.get("Authorization")!;
-    const [scheme, encoded] = authorization.split(" ");
-    return scheme === "Bearer" && encoded === secret;
-}
-
-function createReplyWithTags(
-    nsec: string,
-    mention: Event,
-    message: string,
-    tags: string[][],
-    notice: boolean = true,
+// Create a TODO event
+function createTodoEvent(
+  pubkey: string,
+  content: string,
+  tags: string[][] = []
 ): Event {
-    if (!nsec) throw new Error("TODO_NSEC environment variable is not set");
-    const decoded = nip19.decode(nsec);
-    const sk = decoded.data as Uint8Array;
-    const pk = getPublicKey(sk);
-    if (mention.pubkey === pk) throw new Error("Self reply not acceptable");
-    const tt = [];
-    if (notice) tt.push(["e", mention.id], ["p", mention.pubkey]);
-    else tt.push(["e", mention.id]);
-    if (mention.kind === 42) {
-        for (let tag of mention.tags.filter((x: any[]) => x[0] === "e")) {
-            tt.push(tag);
-        }
-    }
-    for (let tag of tags) {
-        tt.push(tag);
-    }
-    const created_at = mention.created_at + 1;
-    let event = {
-        id: "",
-        kind: mention.kind,
-        pubkey: pk,
-        created_at: created_at,
-        tags: tt,
-        content: message,
-        sig: "",
-    };
-    event.id = getEventHash(event);
-    event = finalizeEvent(event, sk);
-    return event;
+  const event = {
+    id: '',
+    kind: TODO_KIND,
+    pubkey: toddy.pubkey,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['p', pubkey], ...tags], // Mark who owns this TODO
+    content: '', // Will be encrypted
+    sig: '',
+  };
+
+  // Encrypt content for the TODO owner
+  const encryptedContent = nip44.encrypt(toddySk, pubkey, content);
+  event.content = encryptedContent;
+
+  const hash = getEventHash(event as any);
+  event.id = hash;
+  const sig = finalizeEvent(event as any, toddySk);
+
+  return sig;
 }
 
-function createNoteWithTags(
-    nsec: string,
-    mention: Event,
-    message: string,
-    tags: string[][],
-): Event {
-    const decoded = nip19.decode(nsec);
-    const sk = decoded.data as Uint8Array;
-    const pk = getPublicKey(sk);
-    const tt = [];
-    if (mention.kind === 42) {
-        for (let tag of mention.tags.filter((x: any[]) => x[0] === "e")) {
-            tt.push(tag);
-        }
-    }
-    for (let tag of tags) {
-        tt.push(tag);
-    }
-    const created_at = mention.created_at + 1;
-    let event = {
-        id: "",
-        kind: mention.kind,
-        pubkey: pk,
-        created_at: created_at,
-        tags: tt,
-        content: message,
-        sig: "",
-    };
-    event.id = getEventHash(event);
-    event = finalizeEvent(event, sk);
-    return event;
+// Decrypt a TODO event
+function decryptTodoEvent(event: Event, pubkey: string): string | null {
+  try {
+    return nip44.decrypt(toddySk, pubkey, event.content);
+  } catch (err) {
+    console.error('[Decrypt] Error:', err);
+    return null;
+  }
 }
 
-function JSONResponse(value: any): Response {
-    if (value === null) return new Response("");
-    return new Response(JSON.stringify(value), {
-        headers: {
-            "access-control-allow-origin": "*",
-            "content-type": "application/json; charset=UTF-8",
-        },
+// Query TODOs for a user from relay
+async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string }>> {
+  try {
+    const events = await pool.querySync([RELAY_URL], {
+      kinds: [TODO_KIND],
+      tags: { p: [pubkey] },
+      authors: [toddy.pubkey],
+      limit: 100,
     });
+
+    const todos = events
+      .map((e) => {
+        const decrypted = decryptTodoEvent(e, pubkey);
+        return decrypted ? { id: e.id, content: decrypted } : null;
+      })
+      .filter((t) => t !== null) as Array<{ id: string; content: string }>;
+
+    return todos;
+  } catch (err) {
+    console.error('[Query] Error:', err);
+    return [];
+  }
 }
 
-function cleanContent(content: string): string {
-    return content.replace(/nostr:(?!nevent)[a-z0-9]+/gi, '').trim();
+// Create and send DM reply
+async function sendDmReply(recipientPubkey: string, message: string): Promise<void> {
+  try {
+    // DM via NIP-17 pattern
+    const event = {
+      id: '',
+      kind: 4, // Encrypted DM
+      pubkey: toddy.pubkey,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['p', recipientPubkey]],
+      content: '', // Will be encrypted
+      sig: '',
+    };
+
+    // Encrypt DM
+    const encryptedContent = nip44.encrypt(toddySk, recipientPubkey, message);
+    event.content = encryptedContent;
+
+    const hash = getEventHash(event as any);
+    event.id = hash;
+    const sig = finalizeEvent(event as any, toddySk);
+
+    await pool.publish([RELAY_URL], sig);
+    console.log(`[DM] Sent to ${recipientPubkey.slice(0, 8)}`);
+  } catch (err) {
+    console.error('[DM] Error:', err);
+  }
 }
 
-function escapeHtml(str: string): string {
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
+// Command handlers
+function commandList(todos: Array<{ id: string; content: string }>): string {
+  if (todos.length === 0) return '✅ All clear!';
+
+  const lines = todos
+    .map((t, i) => {
+      const content = t.content.length > 40 ? t.content.slice(0, 37) + '...' : t.content;
+      return `${i + 1}. ${content} (${t.id.slice(0, 8)})`;
+    })
+    .join('\n');
+
+  return `📋 Your TODOs:\n${lines}`;
 }
 
-function linkifyNostrRefs(text: string): string {
-    return text.replace(/nostr:(nevent1[a-zA-Z0-9]+)/g, '<a href="https://njump.compile-error.net/$1" target="_blank" rel="noopener noreferrer" style="color: #667eea; text-decoration: underline;">nostr:$1</a>');
+function commandAdd(todos: Array<{ id: string; content: string }>, content: string): string {
+  return `✅ TODO added: "${content}"\nID: ${todos.length + 1}`;
 }
 
-function getHelpMessage(): string {
-    return `使い方:
-list - TODO一覧
-add <内容> - TODO追加
-show <ID> - TODO表示
-update <ID> <内容> - TODO更新
-done <ID> - TODO完了
-delete <ID> - TODO削除
-search <キーワード> - TODO検索
-web - Web表示URL`;
+function commandDone(todos: Array<{ id: string; content: string }>, idStr: string): string {
+  const idx = parseInt(idStr, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= todos.length) {
+    return `❌ Invalid ID. Use "list" to see your TODOs.`;
+  }
+  const todo = todos[idx];
+  return `✅ TODO done: "${todo.content}"`;
 }
 
-async function handleMentionDirect(mention: Event, env: Env): Promise<Response> {
-    // Verify event signature
-    if (!verifyEvent(mention)) {
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, 'Invalid event signature', []),
-        );
-    }
-
-    const pubkey = mention.pubkey;
-    const content = cleanContent(mention.content);
-
-    if (/^list$/i.test(content)) {
-        const { results } = await env.nostr_todo.prepare(
-            'SELECT user_id, content FROM todos WHERE pubkey = ? AND completed = 0 ORDER BY created_at ASC'
-        ).bind(pubkey).all();
-
-        let message = '';
-        if (results.length === 0) {
-            message = 'No todos';
-        } else {
-            message = results.map((row: any) => {
-                const cleanedContent = row.content.replace(/nostr:[a-z0-9]+/gi, '').trim();
-                const preview = cleanedContent.replace(/\s+/g, ' ').trim().substring(0, 20);
-                const truncated = cleanedContent.length > 20 ? '...' : '';
-                return `${row.user_id}. ${preview}${truncated}`;
-            }).join('\n');
-        }
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, message, []),
-        );
-    }
-
-    const addMatch = content.match(/^add\s+(.+)$/is);
-    if (addMatch) {
-        const todoContent = addMatch[1].trim();
-        if (!todoContent) {
-            return JSONResponse(
-                createReplyWithTags(env.TODO_NSEC, mention, 'Usage: add <content>', []),
-            );
-        }
-
-        const inserted = await env.nostr_todo.prepare(
-            `INSERT INTO todos (pubkey, content, completed, created_at, user_id)
-             VALUES (?1, ?2, 0, ?3, (SELECT COALESCE(MAX(user_id), 0) + 1 FROM todos WHERE pubkey = ?1))
-             RETURNING user_id`
-        ).bind(pubkey, todoContent, Math.floor(Date.now() / 1000)).first();
-        const userId = (inserted as any).user_id;
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, `Added: ${userId}`, []),
-        );
-    }
-
-    const deleteMatch = content.match(/^delete\s+(\d+)$/i);
-    if (deleteMatch) {
-        const userId = parseInt(deleteMatch[1]);
-        const result = await env.nostr_todo.prepare(
-            'DELETE FROM todos WHERE user_id = ? AND pubkey = ?'
-        ).bind(userId, pubkey).run();
-
-        const message = result.meta.changes > 0
-            ? `Deleted: ${userId}`
-            : `Not found: ${userId}`;
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, message, []),
-        );
-    }
-
-    const doneMatch = content.match(/^done\s+(\d+)$/i);
-    if (doneMatch) {
-        const userId = parseInt(doneMatch[1]);
-        const result = await env.nostr_todo.prepare(
-            'UPDATE todos SET completed = 1 WHERE user_id = ? AND pubkey = ? AND completed = 0'
-        ).bind(userId, pubkey).run();
-
-        const message = result.meta.changes > 0
-            ? `Done: ${userId}`
-            : `Not found: ${userId}`;
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, message, []),
-        );
-    }
-
-    const searchMatch = content.match(/^search\s+(.+)$/i);
-    if (searchMatch) {
-        const keyword = searchMatch[1].trim();
-        const { results } = await env.nostr_todo.prepare(
-            'SELECT user_id, content FROM todos WHERE pubkey = ? AND completed = 0 AND content LIKE ? ORDER BY created_at ASC'
-        ).bind(pubkey, `%${keyword}%`).all();
-
-        let message = '';
-        if (results.length === 0) {
-            message = 'No todos found';
-        } else {
-            message = results.map((row: any) => {
-                const preview = row.content.replace(/\s+/g, ' ').trim().substring(0, 20);
-                const truncated = row.content.length > 20 ? '...' : '';
-                return `${row.user_id}. ${preview}${truncated}`;
-            }).join('\n');
-        }
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, message, []),
-        );
-    }
-
-    const showMatch = content.match(/^show\s+(\d+)$/i);
-    if (showMatch) {
-        const userId = parseInt(showMatch[1]);
-        const { results } = await env.nostr_todo.prepare(
-            'SELECT user_id, content FROM todos WHERE user_id = ? AND pubkey = ?'
-        ).bind(userId, pubkey).all();
-
-        let message = '';
-        if (results.length === 0) {
-            message = `Not found: ${userId}`;
-        } else {
-            const row: any = results[0];
-            message = `${row.user_id}. ${row.content}`;
-        }
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, message, []),
-        );
-    }
-
-    const updateMatch = content.match(/^update\s+(\d+)\s+(.+)$/is);
-    if (updateMatch) {
-        const userId = parseInt(updateMatch[1]);
-        const newContent = updateMatch[2].trim();
-        if (!newContent) {
-            return JSONResponse(
-                createReplyWithTags(env.TODO_NSEC, mention, 'Usage: update <id> <content>', []),
-            );
-        }
-
-        const result = await env.nostr_todo.prepare(
-            'UPDATE todos SET content = ? WHERE user_id = ? AND pubkey = ?'
-        ).bind(newContent, userId, pubkey).run();
-
-        const message = result.meta.changes > 0
-            ? `Updated: ${userId}`
-            : `Not found: ${userId}`;
-
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, message, []),
-        );
-    }
-
-    if (/^web$/i.test(content)) {
-        const npub = nip19.npubEncode(pubkey);
-        const url = `https://nostr-todo.compile-error.net/${npub}`;
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, url, []),
-        );
-    }
-
-    return JSONResponse(
-        createReplyWithTags(env.TODO_NSEC, mention, getHelpMessage(), []),
-    );
+function commandDelete(todos: Array<{ id: string; content: string }>, idStr: string): string {
+  const idx = parseInt(idStr, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= todos.length) {
+    return `❌ Invalid ID. Use "list" to see your TODOs.`;
+  }
+  const todo = todos[idx];
+  return `🗑️ TODO deleted: "${todo.content}"`;
 }
 
-async function handleMention(request: Request, env: Env): Promise<Response> {
-    const mention: Event = await request.json();
-    return handleMentionDirect(mention, env);
+function commandShow(todos: Array<{ id: string; content: string }>, idStr: string): string {
+  const idx = parseInt(idStr, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= todos.length) {
+    return `❌ Invalid ID. Use "list" to see your TODOs.`;
+  }
+  const todo = todos[idx];
+  return `📝 #${idx + 1}:\n${todo.content}`;
 }
 
-async function handleCall(request: Request, env: Env): Promise<Response> {
-    const mention: Event = await request.json();
+function commandHelp(): string {
+  return `🪿 Toddy TODO Bot — Commands:
+- list          Show all TODOs
+- add <text>    Add a new TODO
+- show <id>     Show full content
+- done <id>     Mark as done
+- delete <id>   Delete TODO
+- search <txt>  Find TODOs
+- help          Show this message`;
+}
 
-    // Verify event signature
-    if (!verifyEvent(mention)) {
-        return JSONResponse(
-            createReplyWithTags(env.TODO_NSEC, mention, 'Invalid event signature', []),
+// Parse and execute command from DM
+async function handleCommand(fromPubkey: string, content: string): Promise<string> {
+  const parts = content.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1).join(' ');
+
+  // Query user's TODOs
+  const todos = await queryUserTodos(fromPubkey);
+
+  switch (cmd) {
+    case 'list':
+      return commandList(todos);
+
+    case 'add':
+      if (!args) return 'Usage: add <content>';
+      // Publish TODO event
+      const todoEvent = createTodoEvent(fromPubkey, args);
+      await pool.publish([RELAY_URL], todoEvent);
+      return commandAdd(todos, args);
+
+    case 'show': {
+      const idStr = args;
+      return commandShow(todos, idStr);
+    }
+
+    case 'done': {
+      const idStr = args;
+      return commandDone(todos, idStr);
+    }
+
+    case 'delete': {
+      const idStr = args;
+      return commandDelete(todos, idStr);
+    }
+
+    case 'search':
+      if (!args) return 'Usage: search <keyword>';
+      {
+        const matches = todos.filter((t) =>
+          t.content.toLowerCase().includes(args.toLowerCase())
         );
-    }
+        if (matches.length === 0) return `🔍 No matches for "${args}"`;
+        const lines = matches
+          .map((t, i) => {
+            const content = t.content.length > 40 ? t.content.slice(0, 37) + '...' : t.content;
+            return `${i + 1}. ${content}`;
+          })
+          .join('\n');
+        return `🔍 Results for "${args}":\n${lines}`;
+      }
 
-    const content = cleanContent(mention.content);
+    case 'help':
+      return commandHelp();
 
-    // "todoさん" の後にコマンドがあれば handleMention へ
-    if (/^todo\s*さん\s+.+/i.test(content)) {
-        // contentから "todoさん" を削除してhandleMentionへ
-        const modifiedContent = content.replace(/^todo\s*さん\s+/i, '');
-        const modifiedMention = { ...mention, content: modifiedContent };
-        // handleMentionを直接呼び出し（Requestオブジェクトは不要）
-        return handleMentionDirect(modifiedMention, env);
-    }
-
-    return JSONResponse(
-        createReplyWithTags(env.TODO_NSEC, mention, `はい\n\n${getHelpMessage()}`, []),
-    );
+    default:
+      return `❓ Unknown command "${cmd}". Type "help" for commands.`;
+  }
 }
 
-async function getRecentUsers(env: Env, limit: number = 10): Promise<any[]> {
-    const { results } = await env.nostr_todo.prepare(
-        'SELECT pubkey, MAX(created_at) as last_created FROM todos GROUP BY pubkey ORDER BY last_created DESC LIMIT ?'
-    ).bind(limit).all();
+// Listen for DMs
+async function startListener() {
+  console.log(`[Relay] Listening for DMs on ${RELAY_URL}...`);
 
-    const users = [];
-    for (const row of results) {
-        const pubkey = (row as any).pubkey;
-        const npub = nip19.npubEncode(pubkey);
+  const filter = {
+    kinds: [4], // Encrypted DMs
+    '#p': [toddy.pubkey],
+    limit: 50,
+  };
 
-        const cacheKey = `https://nostr-todo.compile-error.net/profile/${pubkey}`;
-        let cachedResponse = await cache.match(cacheKey);
-        let profile: any = { name: npub.substring(0, 12) + '...', picture: '' };
+  try {
+    pool.subscribeMany([RELAY_URL], [filter], {
+      onevent(event: Event) {
+        (async () => {
+          if (!verifyEvent(event)) {
+            console.log('[Verify] Invalid signature, skipping');
+            return;
+          }
 
-        if (cachedResponse) {
-            profile = await cachedResponse.json();
-        } else {
-            try {
-                const fallbackUrl = `https://nostr-nullpoga.compile-error.net/profile/${npub}`;
-                const fallbackResponse = await fetch(fallbackUrl);
-                if (fallbackResponse.ok) {
-                    const metadata: any = await fallbackResponse.json();
-                    profile = {
-                        name: metadata.name || metadata.display_name || profile.name,
-                        picture: metadata.picture || ''
-                    };
+          console.log(
+            `[DM] From ${event.pubkey.slice(0, 8)}: ${event.content.slice(0, 50)}`
+          );
 
-                    const profileResponse = new Response(JSON.stringify(profile), {
-                        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' }
-                    });
-                    await cache.put(cacheKey, profileResponse);
-                }
-            } catch (e) {
-                console.error('Failed to fetch profile:', e);
-            }
-        }
+          try {
+            // Decrypt DM
+            const decrypted = nip44.decrypt(toddySk, event.pubkey, event.content);
+            console.log(`[Decrypt] Message: ${decrypted.slice(0, 50)}`);
 
-        users.push({ npub, profile });
-    }
+            // Handle command
+            const reply = await handleCommand(event.pubkey, decrypted);
 
-    return users;
+            // Send DM reply
+            await sendDmReply(event.pubkey, reply);
+          } catch (err) {
+            console.error('[Handle] Error:', err);
+            await sendDmReply(event.pubkey, `❌ Error processing command. Check relay logs.`);
+          }
+        })();
+      },
+
+      onclose() {
+        console.log('[Relay] Connection closed, reconnecting in 5s...');
+        setTimeout(startListener, 5000);
+      },
+    });
+  } catch (err) {
+    console.error('[Listener] Error:', err);
+    setTimeout(startListener, 5000);
+  }
 }
 
-async function handleWebView(npub: string, env: Env, format: 'html' | 'json' = 'html'): Promise<Response> {
-    try {
-        const decoded = nip19.decode(npub);
-        const pubkey = decoded.data as string;
+// Main
+async function main() {
+  loadToddyKey();
+  console.log('[✓] Toddy key loaded');
 
-        // Try to get profile from cache
-        const cacheKey = `https://nostr-todo.compile-error.net/profile/${pubkey}`;
-        let cachedResponse = await cache.match(cacheKey);
-        let profile: any = { name: npub.substring(0, 12) + '...', picture: '' };
+  startListener();
 
-        if (cachedResponse) {
-            profile = await cachedResponse.json();
-        } else {
-            // Fetch profile from relays
-            try {
-                const events = await pool.querySync(relays, { kinds: [0], authors: [pubkey], limit: 1 });
-                if (events.length > 0) {
-                    const metadata = JSON.parse(events[0].content);
-                    profile = {
-                        name: metadata.name || metadata.display_name || profile.name,
-                        picture: metadata.picture || ''
-                    };
-
-                    // Cache profile for 1 hour
-                    const profileResponse = new Response(JSON.stringify(profile), {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Cache-Control': 'public, max-age=3600'
-                        }
-                    });
-                    await cache.put(cacheKey, profileResponse);
-                }
-            } catch (e) {
-                console.error('Failed to fetch profile from relays:', e);
-            }
-
-            // Fallback to HTTP API if relay fetch failed
-            if (!profile.picture && profile.name.startsWith('npub')) {
-                try {
-                    const fallbackUrl = `https://nostr-nullpoga.compile-error.net/profile/${npub}`;
-                    const fallbackResponse = await fetch(fallbackUrl);
-                    if (fallbackResponse.ok) {
-                        const metadata: any = await fallbackResponse.json();
-                        profile = {
-                            name: metadata.name || metadata.display_name || profile.name,
-                            picture: metadata.picture || ''
-                        };
-
-                        // Cache profile for 1 hour
-                        const profileResponse = new Response(JSON.stringify(profile), {
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Cache-Control': 'public, max-age=3600'
-                            }
-                        });
-                        await cache.put(cacheKey, profileResponse);
-                    }
-                } catch (e) {
-                    console.error('Failed to fetch profile from fallback API:', e);
-                }
-            }
-        }
-
-        const { results } = await env.nostr_todo.prepare(
-            'SELECT user_id, content, completed, created_at FROM todos WHERE pubkey = ? ORDER BY completed ASC, created_at ASC'
-        ).bind(pubkey).all();
-
-        const incompleteTodos = results.filter((r: any) => r.completed === 0);
-        const completedTodos = results.filter((r: any) => r.completed === 1);
-
-        // JSON format
-        if (format === 'json') {
-            return new Response(JSON.stringify({
-                npub,
-                pubkey,
-                profile,
-                todos: {
-                    incomplete: incompleteTodos.map((t: any) => ({
-                        id: t.user_id,
-                        content: t.content,
-                        completed: false,
-                        created_at: t.created_at
-                    })),
-                    completed: completedTodos.map((t: any) => ({
-                        id: t.user_id,
-                        content: t.content,
-                        completed: true,
-                        created_at: t.created_at
-                    }))
-                }
-            }, null, 2), {
-                headers: {
-                    'Content-Type': 'application/json; charset=utf-8',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            });
-        }
-
-        const htmlContent = `<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TODO List - ${escapeHtml(profile.name)}</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            overflow: hidden;
-        }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 40px;
-            color: white;
-            position: relative;
-        }
-        .home-link {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            color: white;
-            text-decoration: none;
-            font-size: 1.5em;
-            opacity: 0.8;
-            transition: all 0.2s ease;
-        }
-        .home-link:hover {
-            opacity: 1;
-            transform: scale(1.1);
-        }
-        .profile {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        }
-        .profile-icon {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            object-fit: cover;
-            border: 4px solid rgba(255, 255, 255, 0.3);
-            background: rgba(255, 255, 255, 0.2);
-        }
-        .profile-info { flex: 1; }
-        .profile-name {
-            font-size: 2em;
-            font-weight: bold;
-            margin-bottom: 8px;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
-        }
-        .profile-npub {
-            font-size: 0.85em;
-            opacity: 0.9;
-            word-break: break-all;
-            font-family: monospace;
-            background: rgba(255, 255, 255, 0.2);
-            padding: 8px 12px;
-            border-radius: 8px;
-            display: inline-block;
-        }
-        .content { padding: 40px; }
-        .section {
-            margin-bottom: 40px;
-        }
-        .section:last-child { margin-bottom: 0; }
-        .section-header {
-            display: flex;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 12px;
-            border-bottom: 2px solid #f0f0f0;
-        }
-        .section-title {
-            font-size: 1.3em;
-            font-weight: 600;
-            color: #333;
-            flex: 1;
-        }
-        .section-count {
-            background: #667eea;
-            color: white;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.9em;
-            font-weight: bold;
-        }
-        .section.completed .section-count {
-            background: #10b981;
-        }
-        .empty-state {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-            font-size: 1.1em;
-        }
-        .todo {
-            background: white;
-            margin: 12px 0;
-            padding: 20px;
-            border: 2px solid #f0f0f0;
-            border-radius: 12px;
-            transition: all 0.2s ease;
-            position: relative;
-        }
-        .todo:hover {
-            border-color: #667eea;
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
-            transform: translateY(-2px);
-        }
-        .todo.completed {
-            background: #f9fafb;
-            border-color: #e5e7eb;
-        }
-        .todo.completed:hover {
-            border-color: #10b981;
-            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.1);
-        }
-        .todo-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
-        }
-        .todo-id {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-weight: bold;
-            font-size: 0.9em;
-            min-width: 40px;
-            text-align: center;
-        }
-        .todo.completed .todo-id {
-            background: #10b981;
-        }
-        .todo-content {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            line-height: 1.6;
-            color: #333;
-            font-size: 1.05em;
-        }
-        .todo-date {
-            margin-top: 8px;
-            font-size: 0.85em;
-            color: #999;
-            font-style: italic;
-        }
-        .todo.completed .todo-content {
-            text-decoration: line-through;
-            color: #999;
-        }
-        @media (max-width: 600px) {
-            body { padding: 10px; }
-            .header { padding: 30px 20px; }
-            .content { padding: 20px; }
-            .profile-name { font-size: 1.5em; }
-            .profile-icon { width: 60px; height: 60px; }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <a href="/" class="home-link" title="トップページへ">🏠</a>
-            <div class="profile">
-                ${profile.picture ? `<img src="${escapeHtml(profile.picture)}" alt="${escapeHtml(profile.name)}" class="profile-icon" onerror="this.style.display='none'">` : '<div class="profile-icon"></div>'}
-                <div class="profile-info">
-                    <div class="profile-name">${escapeHtml(profile.name)}</div>
-                    <div class="profile-npub">${escapeHtml(npub)}</div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="content">
-            <div class="section">
-                <div class="section-header">
-                    <div class="section-title">📝 未完了</div>
-                    <div class="section-count">${incompleteTodos.length}</div>
-                </div>
-                ${incompleteTodos.length === 0 ? '<div class="empty-state">🎉 すべて完了しました！</div>' : incompleteTodos.map((todo: any) => `
-                <div class="todo">
-                    <div class="todo-header">
-                        <div class="todo-id">${escapeHtml(String(todo.user_id))}</div>
-                    </div>
-                    <div class="todo-content">${linkifyNostrRefs(escapeHtml(todo.content))}</div>
-                    <div class="todo-date">${new Date(todo.created_at * 1000).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</div>
-                </div>
-                `).join('')}
-            </div>
-            
-            <div class="section completed">
-                <div class="section-header">
-                    <div class="section-title">✅ 完了</div>
-                    <div class="section-count">${completedTodos.length}</div>
-                </div>
-                ${completedTodos.length === 0 ? '<div class="empty-state">完了したTODOはありません</div>' : completedTodos.map((todo: any) => `
-                <div class="todo completed">
-                    <div class="todo-header">
-                        <div class="todo-id">${escapeHtml(String(todo.user_id))}</div>
-                    </div>
-                    <div class="todo-content">${linkifyNostrRefs(escapeHtml(todo.content))}</div>
-                    <div class="todo-date">${new Date(todo.created_at * 1000).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</div>
-                </div>
-                `).join('')}
-            </div>
-        </div>
-    </div>
-</body>
-</html>`;
-
-        return new Response(htmlContent, {
-            headers: { 'Content-Type': 'text/html; charset=utf-8' }
-        });
-    } catch (e) {
-        return new Response('Invalid npub', { status: 400 });
-    }
+  console.log('[✓] Nostr TODO Bot started');
+  console.log(`[✓] Send a DM to ${toddy.npub} to start using!`);
 }
 
-export default {
-    async fetch(
-        request: Request,
-        env: Env,
-    ): Promise<Response> {
-        const { protocol, pathname } = new URL(request.url);
-        const pathArray = pathname.split("/");
-
-        if (
-            "https:" !== protocol ||
-            "https" !== request.headers.get("x-forwarded-proto")
-        ) {
-            throw new Error("Please use a HTTPS connection.");
-        }
-
-        console.log(`${request.method}: ${request.url} `);
-
-        if (request.method === "GET") {
-            // Top page - check before any other handler
-            if (pathname === "/" || pathname === "/index.html" || pathname === "") {
-                const recentUsers = await getRecentUsers(env, 8);
-                const indexHtml = await env.ASSETS.fetch(new Request(new URL('/index.html.template', request.url)));
-                let htmlContent = await indexHtml.text();
-
-                if (recentUsers.length > 0) {
-                    const avatarsHtml = `
-            <div class="recent-users">
-                <div class="recent-users-title">最近のユーザー</div>
-                <div class="avatar-list">
-                    ${recentUsers.map(u => `<a href="/${u.npub}" class="avatar-link" title="${escapeHtml(u.profile.name)}">${u.profile.picture ? `<img src="${escapeHtml(u.profile.picture)}" alt="${escapeHtml(u.profile.name)}" class="avatar-img" onerror="this.style.display='none'">` : '<div class="avatar-placeholder"></div>'}</a>`).join('')}
-                </div>
-            </div>`;
-                    htmlContent = htmlContent.replace(/(.*<div class="subtitle">.*?<\/div>)\s*(<\/div>\s*<div class="content">)/s, `$1${avatarsHtml}\n        $2`);
-
-                    const avatarCss = `.recent-users{margin-top:30px;text-align:center}.recent-users-title{font-size:.9em;opacity:.8;margin-bottom:16px}.avatar-list{display:flex;justify-content:center;gap:12px;flex-wrap:wrap}.avatar-link{display:block;width:50px;height:50px;border-radius:50%;border:3px solid rgba(255,255,255,.3);overflow:hidden;transition:all .2s ease;background:rgba(255,255,255,.2)}.avatar-link:hover{transform:scale(1.15);border-color:rgba(255,255,255,.8);box-shadow:0 4px 12px rgba(0,0,0,.3)}.avatar-img{width:100%;height:100%;object-fit:cover}.avatar-placeholder{width:100%;height:100%;background:rgba(255,255,255,.2)}`;
-                    htmlContent = htmlContent.replace('</style>', avatarCss + '</style>');
-                }
-
-                return new Response(htmlContent, {
-                    headers: {
-                        'Content-Type': 'text/html; charset=utf-8',
-                        'Cache-Control': 'no-cache, no-store, must-revalidate',
-                        'Pragma': 'no-cache',
-                        'Expires': '0'
-                    }
-                });
-            }
-
-            if (pathArray[1] && pathArray[1].startsWith("npub")) {
-                const format = pathArray[1].endsWith('.json') ? 'json' : 'html';
-                const npub = pathArray[1].replace(/\.json$/, '');
-                return handleWebView(npub, env, format);
-            }
-
-            return env.ASSETS.fetch(request);
-        }
-        if (request.method === "POST" && pathArray[1] === "mention") {
-            return handleMention(request, env);
-        }
-
-        if (request.method === "POST" && pathArray[1] === "call") {
-            return handleCall(request, env);
-        }
-
-        return unsupportedMethod(request, env);
-    },
-};
+main().catch(console.error);

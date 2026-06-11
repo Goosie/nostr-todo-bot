@@ -1,41 +1,25 @@
 #!/usr/bin/env node
 
-import 'websocket-polyfill';
+import * as net from 'net';
 import { readFileSync } from 'fs';
-import { resolve } from 'path';
-import {
-  finalizeEvent,
-  getEventHash,
-  nip44,
-  SimplePool,
-} from 'nostr-tools';
 
-const RELAY_URL = process.env.RELAY_URL || 'ws://127.0.0.1:7778';
-const TODDY_KEY_PATH = '/home/deploy/agents/toddy/nostr-key.json';
+const SOCKET_PATH = '/tmp/toddy.sock';
+const AGENTS_JSON_PATH = '/home/deploy/agents/agents.json';
 
-// Load Toddy's key
-const toddyKey = JSON.parse(readFileSync(TODDY_KEY_PATH, 'utf8'));
-const toddySk = new Uint8Array(Buffer.from(toddyKey.nsecHex, 'hex'));
-const toddyPubkey = toddyKey.pubkey;
-
-// Load all agent keys for >>gansnaam lookups
-const agentsJsonPath = '/home/deploy/agents/agents.json';
+// Load agents for >>gansnaam lookups
 let agents = [];
-
 try {
-  const agentsData = JSON.parse(readFileSync(agentsJsonPath, 'utf8'));
+  const agentsData = JSON.parse(readFileSync(AGENTS_JSON_PATH, 'utf8'));
   agents = agentsData.agents || [];
 } catch (err) {
-  console.error('Warning: Could not load agents.json');
+  // Agents file not found, that's ok
 }
 
-// Find agent by name
-function findAgentPubkey(name) {
+function findAgentName(name) {
   const agent = agents.find((a) => a.name.toLowerCase() === name.toLowerCase());
-  return agent ? agent.pubkey : null;
+  return agent ? agent.name : null;
 }
 
-// Parse command line
 function parseArgs() {
   const args = process.argv.slice(2);
   if (args.length === 0) {
@@ -44,60 +28,62 @@ function parseArgs() {
   }
 
   const cmd = args[0];
-  let targetPubkey = toddyPubkey; // Default: Perry (use Toddy's pubkey for local testing)
+  let targetGans = null;
   let message = args.slice(1).join(' ');
 
   // Check for >>gansnaam
   const lastArg = args[args.length - 1];
   if (lastArg.startsWith('>>')) {
     const gansnaam = lastArg.slice(2);
-    const pubkey = findAgentPubkey(gansnaam);
-    if (!pubkey) {
+    const found = findAgentName(gansnaam);
+    if (!found) {
       console.error(`❌ Unknown gans: ${gansnaam}`);
-      console.log('Available ganzen:', agents.map((a) => a.name).join(', '));
+      if (agents.length > 0) {
+        console.log('Available ganzen:', agents.map((a) => a.name).join(', '));
+      }
       process.exit(1);
     }
-    targetPubkey = pubkey;
+    targetGans = found;
     message = args.slice(1, -1).join(' ');
   }
 
-  return { cmd, message, targetPubkey };
+  return { cmd, message, targetGans };
 }
 
-// Create and send DM to Toddy
-async function sendCommandToDM(fromPubkey, command) {
-  const pool = new SimplePool();
+function sendCommand(command) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(SOCKET_PATH, () => {
+      socket.write(`${command}\n`);
 
-  try {
-    const event = {
-      id: '',
-      kind: 4, // Encrypted DM
-      pubkey: fromPubkey,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [['p', toddyPubkey]],
-      content: '', // Will be encrypted
-      sig: '',
-    };
+      let response = '';
+      socket.on('data', (data) => {
+        response += data.toString();
+      });
 
-    // Encrypt DM with Toddy's pubkey
-    const encryptedContent = nip44.encrypt(toddySk, toddyPubkey, command);
-    event.content = encryptedContent;
+      socket.on('end', () => {
+        resolve(response.trim());
+        socket.destroy();
+      });
 
-    // Sign event
-    const hash = getEventHash(event);
-    event.id = hash;
-    const sig = finalizeEvent(event, toddySk);
+      socket.on('error', (err) => {
+        reject(err);
+      });
 
-    // Publish to relay
-    await pool.publish([RELAY_URL], sig);
-    console.log(`✅ Sent to Toddy: "${command}"`);
+      // Timeout if no response
+      setTimeout(() => {
+        socket.destroy();
+        reject(new Error('Socket timeout'));
+      }, 5000);
+    });
 
-    // Close pool
-    setTimeout(() => pool.close(), 100);
-  } catch (err) {
-    console.error(`❌ Error sending command: ${err.message}`);
-    process.exit(1);
-  }
+    socket.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        reject(new Error(`Socket not found at ${SOCKET_PATH}. Is the bot running?`));
+      } else {
+        reject(err);
+      }
+    });
+  });
 }
 
 function printHelp() {
@@ -112,7 +98,7 @@ Usage:
   toddy search <keyword>             Search TODOs
   toddy help                         Show help
 
-For another gans:
+For another gans (supports >>gansnaam):
   toddy add "text" >>gansnaam        Add TODO for gans
   toddy list >>finny                 Show Finny's TODOs
 
@@ -121,12 +107,14 @@ Examples:
   toddy add "Buy milk" >>coachy
   toddy list
   toddy done 1
+
+Note: Bot must be running for CLI to work
+  sudo systemctl status nostr-todo-bot
 `);
 }
 
-// Main
 async function main() {
-  const { cmd, message, targetPubkey } = parseArgs();
+  const { cmd, message, targetGans } = parseArgs();
 
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
     printHelp();
@@ -134,10 +122,14 @@ async function main() {
   }
 
   const command = message ? `${cmd} ${message}` : cmd;
-  await sendCommandToDM(targetPubkey, command);
+
+  try {
+    const response = await sendCommand(command);
+    console.log(response);
+  } catch (err) {
+    console.error(`❌ Error: ${err.message}`);
+    process.exit(1);
+  }
 }
 
-main().catch((err) => {
-  console.error(`❌ Error: ${err.message}`);
-  process.exit(1);
-});
+main();

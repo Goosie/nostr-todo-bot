@@ -1,7 +1,8 @@
 import 'websocket-polyfill';
-import { readFileSync } from 'fs';
+import { readFileSync, unlinkSync } from 'fs';
 import { resolve } from 'path';
 import * as readline from 'readline';
+import * as net from 'net';
 import {
   Event,
   getEventHash,
@@ -16,6 +17,7 @@ import {
 // Env vars
 const RELAY_URL = process.env.RELAY_URL || 'ws://127.0.0.1:7778';
 const TODDY_KEY_PATH = process.env.TODDY_KEY_PATH || '/home/deploy/agents/toddy/nostr-key.json';
+const SOCKET_PATH = '/tmp/toddy.sock';
 const TODO_KIND = 1; // Kind 1 for encrypted TODO storage
 
 // Load Toddy's key
@@ -72,7 +74,8 @@ function createTodoEvent(
   };
 
   // Encrypt content for the TODO owner
-  const encryptedContent = nip44.encrypt(toddySk, pubkey, content);
+  const conversationKey = nip44.getConversationKey(toddySk, pubkey);
+  const encryptedContent = nip44.encrypt(content, conversationKey);
   event.content = encryptedContent;
 
   const hash = getEventHash(event as any);
@@ -85,28 +88,28 @@ function createTodoEvent(
 // Decrypt a TODO event
 function decryptTodoEvent(event: Event, pubkey: string): string | null {
   try {
-    return nip44.decrypt(toddySk, pubkey, event.content);
+    const conversationKey = nip44.getConversationKey(toddySk, pubkey);
+    return nip44.decrypt(event.content, conversationKey);
   } catch (err) {
     console.error('[Decrypt] Error:', err);
     return null;
   }
 }
 
-// Query TODOs for a user from relay (with timeout)
+// Query TODOs for a user from relay
 async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string }>> {
   try {
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Query timeout')), 5000)
-    );
-
-    const queryPromise = pool.querySync([RELAY_URL], {
+    // querySync is synchronous, so use it directly
+    const events = pool.querySync([RELAY_URL], {
       kinds: [TODO_KIND],
       tags: { p: [pubkey] },
       authors: [toddy.pubkey],
       limit: 100,
     });
 
-    const events = await Promise.race([queryPromise, timeoutPromise]);
+    if (!Array.isArray(events)) {
+      return [];
+    }
 
     const todos = events
       .map((e) => {
@@ -137,7 +140,8 @@ async function sendDmReply(recipientPubkey: string, message: string): Promise<vo
     };
 
     // Encrypt DM
-    const encryptedContent = nip44.encrypt(toddySk, recipientPubkey, message);
+    const conversationKey = nip44.getConversationKey(toddySk, recipientPubkey);
+    const encryptedContent = nip44.encrypt(message, conversationKey);
     event.content = encryptedContent;
 
     const hash = getEventHash(event as any);
@@ -320,7 +324,8 @@ async function startListener() {
 
           try {
             // Decrypt DM
-            const decrypted = nip44.decrypt(toddySk, event.pubkey, event.content);
+            const conversationKey = nip44.getConversationKey(toddySk, event.pubkey);
+            const decrypted = nip44.decrypt(event.content, conversationKey);
             console.log(`[Decrypt] Message: ${decrypted.slice(0, 50)}`);
 
             // Handle command
@@ -344,6 +349,69 @@ async function startListener() {
     console.error('[Listener] Error:', err);
     setTimeout(startListener, 5000);
   }
+}
+
+// Listen for local socket commands (from CLI tool)
+async function startSocketListener() {
+  // Remove old socket if exists
+  try {
+    unlinkSync(SOCKET_PATH);
+  } catch (err) {
+    // File doesn't exist, that's fine
+  }
+
+  const server = net.createServer(async (socket) => {
+    let buffer = '';
+    let hasResponded = false;
+
+    socket.on('data', async (data) => {
+      if (hasResponded) {
+        socket.end();
+        return;
+      }
+
+      buffer += data.toString();
+
+      // Process complete lines
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        const input = line.trim();
+        if (!input) continue;
+
+        try {
+          // Use Toddy's pubkey for local commands
+          const reply = await handleCommand(toddy.pubkey, input);
+          socket.write(`${reply}`);
+          socket.end();
+          hasResponded = true;
+          return;
+        } catch (err) {
+          socket.write(`❌ Error: ${err}`);
+          socket.end();
+          hasResponded = true;
+          return;
+        }
+      }
+    });
+
+    socket.on('end', () => {
+      // Client disconnected
+    });
+
+    socket.on('error', (err) => {
+      console.error('[Socket] Error:', err);
+    });
+  });
+
+  server.listen(SOCKET_PATH, () => {
+    console.log(`[Socket] Listening on ${SOCKET_PATH}`);
+  });
+
+  server.on('error', (err) => {
+    console.error('[Socket] Server error:', err);
+  });
 }
 
 // Listen for local STDIN commands (only in interactive mode)
@@ -394,9 +462,11 @@ async function main() {
 
   startListener();
   startStdinListener();
+  startSocketListener();
 
   console.log('[✓] Nostr TODO Bot started');
   console.log(`[✓] Send a DM to ${toddy.npub} to start using!`);
+  console.log(`[✓] Local socket available at ${SOCKET_PATH}`);
 }
 
 main().catch(console.error);

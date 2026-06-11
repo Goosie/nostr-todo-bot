@@ -1,0 +1,22 @@
+✅ TODO added for yourself: "Review expense report" (block 953254)
+✅ TODO added for yourself: "Expense report review due Friday" (block 953254)
+✅ TODO added for yourself: "Test delegation --debug" (block 953254)
+[DEBUG] Command sent: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add Debug test..."
+✅ TODO added for yourself: "Debug test for Finny" (block 953254)
+[DEBUG] Command sent: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add Test deleg..."
+✅ TODO added for yourself: "Test delegation debug" (block 953254)
++ cd /home/deploy/nostr-todo-bot
++ node cli.mjs add 'Test with debug'
+[DEBUG] Command sent: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add Test with ..."
+✅ TODO added for yourself: "Test with debug" (block 953255)
+[DEBUG] Command sent: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add CLI test f..."
+✅ TODO added for yourself: "CLI test for Finny" (block 953255)
+[DEBUG] Command sent: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add CLI delega..."
+✅ TODO added for yourself: "CLI delegation test" (block 953255)
+✅ TODO added for yourself: "Final delegation test" (block 953255)
+[DEBUG] Command sent: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add Direct tes..."
+✅ TODO added for yourself: "Direct test for Finny" (block 953255)
+[DEBUG] Full command: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add Test finny visibility"
+✅ TODO added for yourself: "Test finny visibility" (block 953255)
+[DEBUG] Full command: "@09d30fbe147c42d5108df5f4daab8fb519a1ab427177f26fa4b13c2d23d246c3:add Test finny visibility"
+✅ TODO added for yourself: "Test finny visibility" (block 953255)

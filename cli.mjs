@@ -51,20 +51,24 @@ function parseArgs() {
   let targetGans = null;
   let message = args.slice(1).join(' ');
 
-  // Check for >>gansnaam
+  // Check for >>gansnaam or >>@gansnaam
   const lastArg = args[args.length - 1];
   if (lastArg.startsWith('>>')) {
-    const gansnaam = lastArg.slice(2);
-    const found = findAgentName(gansnaam);
-    if (!found) {
-      console.error(`❌ Unknown gans: ${gansnaam}`);
-      if (agents.length > 0) {
-        console.log('Available ganzen:', agents.map((a) => a.name).join(', '));
+    // Extract gansnaam: >>commy or >>@commy -> commy
+    const gansnaamMatch = lastArg.match(/>>@?(\w+)/);
+    if (gansnaamMatch) {
+      const gansnaam = gansnaamMatch[1];
+      const found = findAgentName(gansnaam);
+      if (!found) {
+        console.error(`❌ Unknown gans: ${gansnaam}`);
+        if (agents.length > 0) {
+          console.log('Available ganzen:', agents.map((a) => a.name).join(', '));
+        }
+        process.exit(1);
       }
-      process.exit(1);
+      targetGans = found;
+      message = args.slice(1, -1).join(' ');
     }
-    targetGans = found;
-    message = args.slice(1, -1).join(' ');
   }
 
   return { cmd, message, targetGans };
@@ -92,8 +96,8 @@ function sendCommand(command) {
       // Timeout if no response
       setTimeout(() => {
         socket.destroy();
-        reject(new Error('Socket timeout'));
-      }, 5000);
+        reject(new Error('Socket timeout (10s)'));
+      }, 10000);
     });
 
     socket.on('error', (err) => {
@@ -160,6 +164,7 @@ async function main() {
     command += ` >>@${targetGans}`;
   }
 
+
   try {
     const response = await sendCommand(command);
     console.log(response);
@@ -169,4 +174,7 @@ async function main() {
   }
 }
 
-main();
+main().catch((err) => {
+  console.error(`❌ Fatal error: ${err.message}`);
+  process.exit(1);
+});

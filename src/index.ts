@@ -523,56 +523,13 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
   }
 }
 
-// Listen for DMs
+// Listen for DMs (disabled for now — using CLI socket instead)
 async function startListener() {
-  console.log(`[Relay] Listening for DMs on ${RELAY_URL}...`);
+  console.log(`[Relay] DM listener disabled (using CLI socket interface instead)`);
 
-  const filter = {
-    kinds: [4], // Encrypted DMs
-    '#p': [toddy.pubkey],
-    limit: 50,
-  };
-
-  try {
-    pool.subscribeMany([RELAY_URL], [filter], {
-      onevent(event: Event) {
-        (async () => {
-          if (!verifyEvent(event)) {
-            console.log('[Verify] Invalid signature, skipping');
-            return;
-          }
-
-          console.log(
-            `[DM] From ${event.pubkey.slice(0, 8)}: ${event.content.slice(0, 50)}`
-          );
-
-          try {
-            // Decrypt DM
-            const conversationKey = nip44.getConversationKey(toddySk, event.pubkey);
-            const decrypted = nip44.decrypt(event.content, conversationKey);
-            console.log(`[Decrypt] Message: ${decrypted.slice(0, 50)}`);
-
-            // Handle command
-            const reply = await handleCommand(event.pubkey, decrypted);
-
-            // Send DM reply
-            await sendDmReply(event.pubkey, reply);
-          } catch (err) {
-            console.error('[Handle] Error:', err);
-            await sendDmReply(event.pubkey, `❌ Error processing command. Check relay logs.`);
-          }
-        })();
-      },
-
-      onclose() {
-        console.log('[Relay] Connection closed, reconnecting in 5s...');
-        setTimeout(startListener, 5000);
-      },
-    });
-  } catch (err) {
-    console.error('[Listener] Error:', err);
-    setTimeout(startListener, 5000);
-  }
+  // TODO: Re-enable when SimplePool DM filtering is working
+  // For now, all commands go through: toddy <cmd> [args]
+  // which uses the Unix socket at /tmp/toddy.sock
 }
 
 // Listen for local socket commands (from CLI tool)

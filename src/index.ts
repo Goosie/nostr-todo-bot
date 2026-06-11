@@ -63,14 +63,21 @@ function checkRateLimit(pubkey: string): boolean {
 function createTodoEvent(
   pubkey: string,
   content: string,
-  tags: string[][] = []
+  tags: string[][] = [],
+  blocknr: number = 0
 ): Event {
+  // Build tags BEFORE calculating hash
+  const allTags = [['p', pubkey], ...tags];
+  if (blocknr > 0) {
+    allTags.push(['blocknr', String(blocknr)]);
+  }
+
   const event = {
     id: '',
     kind: TODO_KIND,
     pubkey: toddy.pubkey,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [['p', pubkey], ...tags], // Mark who owns this TODO
+    tags: allTags,
     content: '', // Will be encrypted
     sig: '',
   };
@@ -103,13 +110,17 @@ async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; conte
   try {
     // querySync is actually async (returns Promise despite the name)
     // Query all Kind 1 events from Toddy, filter client-side
+    console.log(`[Query] Fetching TODOs for pubkey ${pubkey.slice(0, 8)}...`);
     const events = await pool.querySync([RELAY_URL], {
       kinds: [TODO_KIND],
       authors: [toddy.pubkey],
       limit: 1000,
     });
 
-    console.log(`[Query] Got ${events?.length || 'null'} events for ${pubkey.slice(0, 8)}`);
+    console.log(`[Query] Got ${events?.length || 'null'} total events`);
+    if (events && events.length > 0) {
+      console.log(`[Query] Sample event tags:`, events[0].tags.slice(0, 3));
+    }
 
     if (!Array.isArray(events)) {
       console.log('[Query] Events is not array, got:', typeof events);
@@ -379,12 +390,7 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
 
         // Get current block number and publish TODO event
         const blocknr = await getCurrentBlocknr();
-        const todoEvent = createTodoEvent(targetPubkey, cleanContent);
-
-        // Add block number as tag
-        if (blocknr > 0) {
-          (todoEvent as any).tags.push(['blocknr', String(blocknr)]);
-        }
+        const todoEvent = createTodoEvent(targetPubkey, cleanContent, [], blocknr);
 
         await pool.publish([RELAY_URL], todoEvent);
         const blockInfo = blocknr > 0 ? ` (block ${blocknr})` : '';
@@ -407,16 +413,21 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       // Get current block and publish a done marker event
       const doneBlocknr = await getCurrentBlocknr();
 
+      // Build tags BEFORE hashing
+      const doneTags = [
+        ['p', actualFromPubkey],
+        ['e', todo.id, '', 'done'],
+      ];
+      if (doneBlocknr > 0) {
+        doneTags.push(['done_blocknr', String(doneBlocknr)]);
+      }
+
       const doneEvent = {
         id: '',
         kind: TODO_KIND,
         pubkey: toddy.pubkey,
         created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ['p', actualFromPubkey],
-          ['e', todo.id, '', 'done'], // Reference the TODO being marked done
-          ...(doneBlocknr > 0 ? [['done_blocknr', String(doneBlocknr)]] : []),
-        ],
+        tags: doneTags,
         content: '', // Encrypted marker
         sig: '',
       };
@@ -445,16 +456,21 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       // Get current block and publish a delete marker event
       const deleteBlocknr = await getCurrentBlocknr();
 
+      // Build tags BEFORE hashing
+      const deleteTags = [
+        ['p', actualFromPubkey],
+        ['e', todo.id, '', 'delete'],
+      ];
+      if (deleteBlocknr > 0) {
+        deleteTags.push(['deleted_blocknr', String(deleteBlocknr)]);
+      }
+
       const deleteEvent = {
         id: '',
         kind: TODO_KIND,
         pubkey: toddy.pubkey,
         created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ['p', actualFromPubkey],
-          ['e', todo.id, '', 'delete'], // Reference the TODO being deleted
-          ...(deleteBlocknr > 0 ? [['deleted_blocknr', String(deleteBlocknr)]] : []),
-        ],
+        tags: deleteTags,
         content: '', // Encrypted marker
         sig: '',
       };

@@ -243,17 +243,37 @@ function commandHelp(): string {
 - help          Show this message`;
 }
 
-// Helper: get current block number from Blocky
+// Helper: get current block number from mempool.space or local Umbrel node
 async function getCurrentBlocknr(): Promise<number> {
   try {
-    // Try to read from Blocky's state file or query it
-    // For now, return a placeholder - we'll query Blocky's state
-    const blockState = readFileSync('/tmp/blocky-block.txt', 'utf8').trim();
-    return parseInt(blockState, 10) || 0;
+    // Try local Umbrel node first (via Tailscale)
+    const localResponse = await fetch('http://100.111.14.11:3006/api/blocks/tip/height', {
+      timeout: 3000,
+    }).catch(() => null);
+
+    if (localResponse?.ok) {
+      const height = await localResponse.text();
+      return parseInt(height, 10);
+    }
   } catch (err) {
-    // If no file, return 0 (we'll store it anyway)
-    return 0;
+    console.log('[Block] Local node unreachable');
   }
+
+  try {
+    // Fallback to mempool.space public API
+    const response = await fetch('https://mempool.space/api/blocks/tip/height', {
+      timeout: 5000,
+    });
+    if (response.ok) {
+      const height = await response.text();
+      return parseInt(height, 10);
+    }
+  } catch (err) {
+    console.log('[Block] Mempool API unreachable');
+  }
+
+  // Fallback: return 0 (we'll still track it)
+  return 0;
 }
 
 // Helper: load agents and look up pubkey by name
@@ -357,10 +377,18 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
           targetName = targetGans;
         }
 
-        // Publish TODO event for target
+        // Get current block number and publish TODO event
+        const blocknr = await getCurrentBlocknr();
         const todoEvent = createTodoEvent(targetPubkey, cleanContent);
+
+        // Add block number as tag
+        if (blocknr > 0) {
+          (todoEvent as any).tags.push(['blocknr', String(blocknr)]);
+        }
+
         await pool.publish([RELAY_URL], todoEvent);
-        return `✅ TODO added for ${targetName}: "${cleanContent}"`;
+        const blockInfo = blocknr > 0 ? ` (block ${blocknr})` : '';
+        return `✅ TODO added for ${targetName}: "${cleanContent}"${blockInfo}`;
       }
 
     case 'show': {
@@ -376,7 +404,9 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       }
       const todo = todos[idx];
 
-      // Publish a done marker event
+      // Get current block and publish a done marker event
+      const doneBlocknr = await getCurrentBlocknr();
+
       const doneEvent = {
         id: '',
         kind: TODO_KIND,
@@ -385,6 +415,7 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
         tags: [
           ['p', actualFromPubkey],
           ['e', todo.id, '', 'done'], // Reference the TODO being marked done
+          ...(doneBlocknr > 0 ? [['done_blocknr', String(doneBlocknr)]] : []),
         ],
         content: '', // Encrypted marker
         sig: '',
@@ -399,7 +430,8 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       const sig = finalizeEvent(doneEvent as any, toddySk);
 
       await pool.publish([RELAY_URL], sig);
-      return commandDone(todos, idStr);
+      const blockInfo = doneBlocknr > 0 ? ` (block ${doneBlocknr})` : '';
+      return `✅ ${todo.content}${blockInfo}`;
     }
 
     case 'delete': {
@@ -410,7 +442,9 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       }
       const todo = todos[idx];
 
-      // Publish a delete marker event
+      // Get current block and publish a delete marker event
+      const deleteBlocknr = await getCurrentBlocknr();
+
       const deleteEvent = {
         id: '',
         kind: TODO_KIND,
@@ -419,6 +453,7 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
         tags: [
           ['p', actualFromPubkey],
           ['e', todo.id, '', 'delete'], // Reference the TODO being deleted
+          ...(deleteBlocknr > 0 ? [['deleted_blocknr', String(deleteBlocknr)]] : []),
         ],
         content: '', // Encrypted marker
         sig: '',
@@ -433,7 +468,8 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       const sig = finalizeEvent(deleteEvent as any, toddySk);
 
       await pool.publish([RELAY_URL], sig);
-      return commandDelete(todos, idStr);
+      const blockInfo = deleteBlocknr > 0 ? ` (block ${deleteBlocknr})` : '';
+      return `🗑️ ${todo.content}${blockInfo}`;
     }
 
     case 'search':

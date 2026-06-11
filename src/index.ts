@@ -114,8 +114,30 @@ async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; conte
       return [];
     }
 
+    // First pass: collect all event IDs marked as deleted or done
+    const deleteMarkers = new Set<string>();
+    const doneMarkers = new Set<string>();
+    events.forEach((e) => {
+      const eTag = e.tags.find((t) => t[0] === 'e');
+      const deleteTag = e.tags.find((t) => t[0] === 'e' && t[3] === 'delete');
+      const doneTag = e.tags.find((t) => t[0] === 'e' && t[3] === 'done');
+      if (deleteTag && eTag) {
+        deleteMarkers.add(eTag[1]);
+      }
+      if (doneTag && eTag) {
+        doneMarkers.add(eTag[1]);
+      }
+    });
+
     const todos = events
       .filter((e) => {
+        // Filter out delete/done markers
+        const isMarker = e.tags.some((t) => t[0] === 'e' && (t[3] === 'delete' || t[3] === 'done'));
+        if (isMarker) return false;
+
+        // Skip if this TODO was marked deleted or done
+        if (deleteMarkers.has(e.id) || doneMarkers.has(e.id)) return false;
+
         // Filter client-side: only events where pubkey is in the #p tags
         const pTag = e.tags.find((t) => t[0] === 'p' && t[1] === pubkey);
         return !!pTag;
@@ -275,11 +297,69 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
 
     case 'done': {
       const idStr = args;
+      const idx = parseInt(idStr, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= todos.length) {
+        return `❌ Invalid ID. Use "list" to see your TODOs.`;
+      }
+      const todo = todos[idx];
+
+      // Publish a done marker event
+      const doneEvent = {
+        id: '',
+        kind: TODO_KIND,
+        pubkey: toddy.pubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['p', fromPubkey],
+          ['e', todo.id, '', 'done'], // Reference the TODO being marked done
+        ],
+        content: '', // Encrypted marker
+        sig: '',
+      };
+
+      const conversationKey = nip44.getConversationKey(toddySk, fromPubkey);
+      const encryptedContent = nip44.encrypt('DONE', conversationKey);
+      doneEvent.content = encryptedContent;
+
+      const hash = getEventHash(doneEvent as any);
+      doneEvent.id = hash;
+      const sig = finalizeEvent(doneEvent as any, toddySk);
+
+      await pool.publish([RELAY_URL], sig);
       return commandDone(todos, idStr);
     }
 
     case 'delete': {
       const idStr = args;
+      const idx = parseInt(idStr, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= todos.length) {
+        return `❌ Invalid ID. Use "list" to see your TODOs.`;
+      }
+      const todo = todos[idx];
+
+      // Publish a delete marker event
+      const deleteEvent = {
+        id: '',
+        kind: TODO_KIND,
+        pubkey: toddy.pubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['p', fromPubkey],
+          ['e', todo.id, '', 'delete'], // Reference the TODO being deleted
+        ],
+        content: '', // Encrypted marker
+        sig: '',
+      };
+
+      const conversationKey = nip44.getConversationKey(toddySk, fromPubkey);
+      const encryptedContent = nip44.encrypt('DELETED', conversationKey);
+      deleteEvent.content = encryptedContent;
+
+      const hash = getEventHash(deleteEvent as any);
+      deleteEvent.id = hash;
+      const sig = finalizeEvent(deleteEvent as any, toddySk);
+
+      await pool.publish([RELAY_URL], sig);
       return commandDelete(todos, idStr);
     }
 

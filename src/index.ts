@@ -1,6 +1,7 @@
 import 'websocket-polyfill';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import * as readline from 'readline';
 import {
   Event,
   getEventHash,
@@ -25,11 +26,34 @@ function loadToddyKey() {
   const keyData = JSON.parse(readFileSync(TODDY_KEY_PATH, 'utf8'));
   toddy = keyData;
   toddySk = new Uint8Array(Buffer.from(toddy.nsecHex, 'hex'));
-  console.log(`[Toddy] Loaded pubkey: ${toddy.pubkey}`);
+  console.log(`[Toddy] Agent loaded`);
 }
 
 // Relay and pool
 const pool = new SimplePool();
+
+// Rate limiting (per pubkey, max 5 commands per minute)
+const commandCounts = new Map<string, number[]>();
+
+function checkRateLimit(pubkey: string): boolean {
+  const now = Date.now();
+  const oneMinuteAgo = now - 60000;
+
+  if (!commandCounts.has(pubkey)) {
+    commandCounts.set(pubkey, []);
+  }
+
+  const timestamps = commandCounts.get(pubkey)!;
+  const recent = timestamps.filter((t) => t > oneMinuteAgo);
+
+  if (recent.length >= 5) {
+    return false; // Rate limit exceeded
+  }
+
+  recent.push(now);
+  commandCounts.set(pubkey, recent);
+  return true;
+}
 
 // Create a TODO event
 function createTodoEvent(
@@ -68,15 +92,21 @@ function decryptTodoEvent(event: Event, pubkey: string): string | null {
   }
 }
 
-// Query TODOs for a user from relay
+// Query TODOs for a user from relay (with timeout)
 async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string }>> {
   try {
-    const events = await pool.querySync([RELAY_URL], {
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Query timeout')), 5000)
+    );
+
+    const queryPromise = pool.querySync([RELAY_URL], {
       kinds: [TODO_KIND],
       tags: { p: [pubkey] },
       authors: [toddy.pubkey],
       limit: 100,
     });
+
+    const events = await Promise.race([queryPromise, timeoutPromise]);
 
     const todos = events
       .map((e) => {
@@ -177,8 +207,31 @@ function commandHelp(): string {
 - help          Show this message`;
 }
 
+// Input validation
+function validateTodoContent(content: string): { valid: boolean; error?: string } {
+  const MAX_LENGTH = 500;
+  const INVALID_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
+
+  if (content.length === 0) {
+    return { valid: false, error: 'Content cannot be empty' };
+  }
+  if (content.length > MAX_LENGTH) {
+    return { valid: false, error: `Content too long (max ${MAX_LENGTH} chars)` };
+  }
+  if (INVALID_CHARS.test(content)) {
+    return { valid: false, error: 'Invalid characters in content' };
+  }
+
+  return { valid: true };
+}
+
 // Parse and execute command from DM
 async function handleCommand(fromPubkey: string, content: string): Promise<string> {
+  // Rate limiting
+  if (!checkRateLimit(fromPubkey)) {
+    return '⏸️ Too many commands. Please wait a minute.';
+  }
+
   const parts = content.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1).join(' ');
@@ -192,10 +245,16 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
 
     case 'add':
       if (!args) return 'Usage: add <content>';
-      // Publish TODO event
-      const todoEvent = createTodoEvent(fromPubkey, args);
-      await pool.publish([RELAY_URL], todoEvent);
-      return commandAdd(todos, args);
+      {
+        const validation = validateTodoContent(args);
+        if (!validation.valid) {
+          return `❌ ${validation.error}`;
+        }
+        // Publish TODO event
+        const todoEvent = createTodoEvent(fromPubkey, args);
+        await pool.publish([RELAY_URL], todoEvent);
+        return commandAdd(todos, args);
+      }
 
     case 'show': {
       const idStr = args;
@@ -287,12 +346,54 @@ async function startListener() {
   }
 }
 
+// Listen for local STDIN commands (only in interactive mode)
+async function startStdinListener() {
+  // Only start if stdin is a TTY (interactive terminal)
+  if (!process.stdin.isTTY) {
+    return;
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: '> ',
+  });
+
+  console.log('\n[CLI] Type commands (add, list, done, delete, search, help):');
+  rl.prompt();
+
+  rl.on('line', async (line: string) => {
+    const input = line.trim();
+    if (!input) {
+      rl.prompt();
+      return;
+    }
+
+    try {
+      // Use Perry's pubkey as the default user for local commands
+      const perryPubkey = toddy.pubkey; // For now, use Toddy's own pubkey as test user
+      const reply = await handleCommand(perryPubkey, input);
+      console.log(`${reply}\n`);
+    } catch (err) {
+      console.error(`❌ Error: ${err}\n`);
+    }
+
+    rl.prompt();
+  });
+
+  rl.on('close', () => {
+    console.log('[CLI] Exiting...');
+    process.exit(0);
+  });
+}
+
 // Main
 async function main() {
   loadToddyKey();
   console.log('[✓] Toddy key loaded');
 
   startListener();
+  startStdinListener();
 
   console.log('[✓] Nostr TODO Bot started');
   console.log(`[✓] Send a DM to ${toddy.npub} to start using!`);

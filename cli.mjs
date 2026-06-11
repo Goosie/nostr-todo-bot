@@ -121,7 +121,11 @@ async function main() {
     process.exit(0);
   }
 
-  const command = message ? `${cmd} ${message}` : cmd;
+  // Build command with optional target gans
+  let command = message ? `${cmd} ${message}` : cmd;
+  if (targetGans) {
+    command += ` >>@${targetGans}`;
+  }
 
   try {
     const response = await sendCommand(command);

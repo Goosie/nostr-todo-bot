@@ -243,6 +243,36 @@ function commandHelp(): string {
 - help          Show this message`;
 }
 
+// Helper: load agents and look up pubkey by name
+function loadAgents(): Record<string, any> {
+  try {
+    const agentsPath = '/home/deploy/agents/agents.json';
+    const agentsData = JSON.parse(readFileSync(agentsPath, 'utf8'));
+    return agentsData.agents || [];
+  } catch (err) {
+    console.log('[Agents] Failed to load agents.json');
+    return [];
+  }
+}
+
+// Helper: extract target gans from command (e.g., "add test >>@commy" -> "commy")
+function extractTargetGans(content: string): { cleanContent: string; targetGans?: string } {
+  const match = content.match(/>>@(\w+)$/);
+  if (match) {
+    const gansnaam = match[1];
+    const cleanContent = content.replace(/\s*>>@\w+$/, '').trim();
+    return { cleanContent, targetGans: gansnaam };
+  }
+  return { cleanContent: content };
+}
+
+// Helper: look up gans pubkey by name
+function getGansPubkey(gansnaam: string): string | null {
+  const agents = loadAgents();
+  const agent = agents.find((a: any) => a.name.toLowerCase() === gansnaam.toLowerCase());
+  return agent?.pubkey || null;
+}
+
 // Input validation
 function validateTodoContent(content: string): { valid: boolean; error?: string } {
   const MAX_LENGTH = 500;
@@ -280,16 +310,35 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
       return commandList(todos);
 
     case 'add':
-      if (!args) return 'Usage: add <content>';
+      if (!args) return 'Usage: add <content> [>>@gansnaam]';
       {
-        const validation = validateTodoContent(args);
+        // Extract target gans if specified
+        const { cleanContent, targetGans } = extractTargetGans(args);
+
+        if (!cleanContent) return 'Usage: add <content> [>>@gansnaam]';
+
+        const validation = validateTodoContent(cleanContent);
         if (!validation.valid) {
           return `❌ ${validation.error}`;
         }
-        // Publish TODO event
-        const todoEvent = createTodoEvent(fromPubkey, args);
+
+        // Determine target pubkey
+        let targetPubkey = fromPubkey;
+        let targetName = 'yourself';
+
+        if (targetGans) {
+          const gansPubkey = getGansPubkey(targetGans);
+          if (!gansPubkey) {
+            return `❌ Unknown gans: ${targetGans}`;
+          }
+          targetPubkey = gansPubkey;
+          targetName = targetGans;
+        }
+
+        // Publish TODO event for target
+        const todoEvent = createTodoEvent(targetPubkey, cleanContent);
         await pool.publish([RELAY_URL], todoEvent);
-        return commandAdd(todos, args);
+        return `✅ TODO added for ${targetName}: "${cleanContent}"`;
       }
 
     case 'show': {

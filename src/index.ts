@@ -100,18 +100,26 @@ function decryptTodoEvent(event: Event, pubkey: string): string | null {
 async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string }>> {
   try {
     // querySync is synchronous, so use it directly
+    // Query all Kind 1 events from Toddy, filter client-side
     const events = pool.querySync([RELAY_URL], {
       kinds: [TODO_KIND],
-      tags: { p: [pubkey] },
       authors: [toddy.pubkey],
-      limit: 100,
+      limit: 1000,
     });
 
+    console.log(`[Query] Got ${events?.length || 'null'} events`);
+
     if (!Array.isArray(events)) {
+      console.log('[Query] Events is not array');
       return [];
     }
 
     const todos = events
+      .filter((e) => {
+        // Filter client-side: only events where pubkey is in the #p tags
+        const pTag = e.tags.find((t) => t[0] === 'p' && t[1] === pubkey);
+        return !!pTag;
+      })
       .map((e) => {
         const decrypted = decryptTodoEvent(e, pubkey);
         return decrypted ? { id: e.id, content: decrypted } : null;
@@ -459,6 +467,15 @@ async function startStdinListener() {
 async function main() {
   loadToddyKey();
   console.log('[✓] Toddy key loaded');
+
+  // Warm up relay connection
+  console.log('[Relay] Warming up connection...');
+  try {
+    const warmup = pool.querySync([RELAY_URL], { kinds: [999], limit: 1 });
+    console.log(`[Relay] Warmup: got ${warmup?.length || 0} events`);
+  } catch (err) {
+    console.log('[Relay] Warmup failed (non-fatal)');
+  }
 
   startListener();
   startStdinListener();

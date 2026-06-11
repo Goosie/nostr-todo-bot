@@ -331,7 +331,7 @@
 
     async function loadProjects() {
       try {
-        const res = await fetch('/api/projects');
+        const res = await fetch('/toddy/api/projects');
         if (!res.ok) {
           console.error('Failed to load projects:', res.status);
           return;
@@ -360,7 +360,7 @@
 
     async function openWorkflow(projectId) {
       try {
-        const res = await fetch(`/api/projects/${projectId}`);
+        const res = await fetch(`/toddy/toddy/api/projects/${projectId}`);
         const project = await res.json();
         currentProject = project;
 
@@ -433,7 +433,7 @@
       }
 
       try {
-        await fetch(`/api/projects/${projectId}/steps`, {
+        await fetch(`/toddy/toddy/api/projects/${projectId}/steps`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -444,7 +444,7 @@
         });
 
         // Reload workflow
-        const res = await fetch(`/api/projects/${projectId}`);
+        const res = await fetch(`/toddy/toddy/api/projects/${projectId}`);
         const project = await res.json();
         renderWorkflow(project);
       } catch (err) {
@@ -454,7 +454,7 @@
 
     async function updateStepStatus(stepId, status) {
       try {
-        await fetch(`/api/steps/${stepId}`, {
+        await fetch(`/toddy/api/steps/${stepId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -493,7 +493,7 @@
       try {
         console.log('[POST] Creating project:', { name, description, createdBy });
 
-        const res = await fetch('/api/projects', {
+        const res = await fetch('/toddy/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, description, createdBy }),

@@ -99,18 +99,18 @@ function decryptTodoEvent(event: Event, pubkey: string): string | null {
 // Query TODOs for a user from relay
 async function queryUserTodos(pubkey: string): Promise<Array<{ id: string; content: string }>> {
   try {
-    // querySync is synchronous, so use it directly
+    // querySync is actually async (returns Promise despite the name)
     // Query all Kind 1 events from Toddy, filter client-side
-    const events = pool.querySync([RELAY_URL], {
+    const events = await pool.querySync([RELAY_URL], {
       kinds: [TODO_KIND],
       authors: [toddy.pubkey],
       limit: 1000,
     });
 
-    console.log(`[Query] Got ${events?.length || 'null'} events`);
+    console.log(`[Query] Got ${events?.length || 'null'} events for ${pubkey.slice(0, 8)}`);
 
     if (!Array.isArray(events)) {
-      console.log('[Query] Events is not array');
+      console.log('[Query] Events is not array, got:', typeof events);
       return [];
     }
 

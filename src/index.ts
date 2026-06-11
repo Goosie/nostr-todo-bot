@@ -373,8 +373,10 @@ async function handleCommand(fromPubkey: string, content: string): Promise<strin
     case 'add':
       if (!args) return 'Usage: add <content> [>>@gansnaam]';
       {
+        console.log(`[Add] Raw args: "${args}"`);
         // Extract target gans if specified
         const { cleanContent, targetGans } = extractTargetGans(args);
+        console.log(`[Add] Parsed - cleanContent: "${cleanContent}", targetGans: "${targetGans || 'none'}"`);
 
         if (!cleanContent) return 'Usage: add <content> [>>@gansnaam]';
 

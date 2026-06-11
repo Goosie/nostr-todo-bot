@@ -34,7 +34,9 @@ function getGansPubkey(gansnaam) {
 }
 
 function findAgentName(name) {
+  console.error(`[findAgentName] Looking for "${name}" in ${agents.length} agents`);
   const agent = agents.find((a) => a.name.toLowerCase() === name.toLowerCase());
+  console.error(`[findAgentName] Found: ${agent ? agent.name : 'null'}`);
   return agent ? agent.name : null;
 }
 
